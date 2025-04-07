@@ -140,7 +140,7 @@ const DIYChatbot = () => {
             "Content-Type": "application/json",
             Authorization: `Bearer ${
               import.meta.env.VITE_OPENROUTER_API_KEY ||
-              "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"
+              "API Key"
             }`,
             "HTTP-Referer": window.location.origin, // Required by OpenRouter
             "X-Title": "DIY Assistant", // Optional but good practice

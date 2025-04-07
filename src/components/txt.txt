@@ -1,0 +1,350 @@
+import { useState, useEffect, useRef, useCallback } from "react";
+import ReactMarkdown from "react-markdown";
+import diyKeywords from "./diyKeywords";
+
+const Ollmabot = () => {
+  // State management
+  const [messages, setMessages] = useState(() => {
+    const saved = localStorage.getItem('chatMessages');
+    return saved ? JSON.parse(saved) : [];
+  });
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [modelConfig, setModelConfig] = useState({
+    model: "gemma:2b",
+    temperature: 0.7,
+    max_tokens: 1000
+  });
+  const [typing, setTyping] = useState(false);
+  
+  const chatEndRef = useRef(null);
+  const speechRef = useRef(null);
+  const abortControllerRef = useRef(null);
+
+  // Persist messages to localStorage
+  useEffect(() => {
+    localStorage.setItem('chatMessages', JSON.stringify(messages));
+  }, [messages]);
+
+  // Auto-scroll and clean up speech
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    return () => {
+      if (speechRef.current) {
+        window.speechSynthesis.cancel();
+      }
+    };
+  }, [messages]);
+
+  // Helper functions
+  const isDIYRelated = (text) => {
+    const lowerText = text.toLowerCase();
+    return diyKeywords.some(keyword => lowerText.includes(keyword)) ||
+           // Catch question formats
+           /(how to|make|build|create|fix)/i.test(text) ||
+           // Catch material mentions
+           /(paper|wood|metal|fabric)/i.test(text);
+  };
+
+  const isGreeting = useCallback((text) => {
+    const greetings = ["hello", "hi", "hey", "greetings", "what's up", "howdy"];
+    return greetings.some(greet => text.toLowerCase().includes(greet));
+  }, []);
+
+  const speakText = (text) => {
+    if (isSpeaking) {
+      window.speechSynthesis.cancel();
+      setIsSpeaking(false);
+      return;
+    }
+    
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.onend = () => setIsSpeaking(false);
+    speechRef.current = utterance;
+    window.speechSynthesis.speak(utterance);
+    setIsSpeaking(true);
+  };
+
+  const clearConversation = () => {
+    setMessages([]);
+    localStorage.removeItem('chatMessages');
+  };
+
+  const handleSendMessage = useCallback(async () => {
+    if (!input.trim() || loading) return;
+
+    const userInput = input.trim();
+    const userMessage = { text: userInput, sender: "user", timestamp: new Date().toISOString() };
+    
+    setMessages(prev => [...prev, userMessage]);
+    setInput("");
+    setLoading(true);
+    setTyping(true);
+
+    // Handle greetings
+    if (isGreeting(userInput)) {
+      const greetingResponse = {
+        text: "Hello DIY enthusiast! Ready to tackle a project?",
+        sender: "bot",
+        timestamp: new Date().toISOString()
+      };
+      setMessages(prev => [...prev, greetingResponse]);
+      setLoading(false);
+      setTyping(false);
+      return;
+    }
+
+    // Filter non-DIY questions
+    if (!isDIYRelated(userInput) && !userInput.toLowerCase().includes('how to')) {
+      // Replace the irrelevantResponse with:
+const irrelevantResponse = {
+  text: "I specialize in DIY projects. Here's what I know about that:\n\n" + 
+        "(The bot will now attempt to answer anyway)",
+  sender: "bot",
+  timestamp: new Date().toISOString()
+};
+      setMessages(prev => [...prev, irrelevantResponse]);
+      setLoading(false);
+      setTyping(false);
+      return;
+    }
+
+    // Prepare the conversation context
+    const conversationContext = messages
+      .slice(-6) // Last 3 exchanges (6 messages)
+      .map(msg => `${msg.sender === 'user' ? 'User' : 'Bot'}: ${msg.text}`)
+      .join('\n');
+
+    abortControllerRef.current = new AbortController();
+    
+    try {
+      // In handleSendMessage, replace the API call with:
+const response = await fetch("http://localhost:11434/api/generate", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    model: modelConfig.model,
+    prompt: `You are a helpful DIY assistant. Answer questions about crafts, building, and creative projects.
+${conversationContext}
+User: ${userInput}
+Bot:`,  // Remove any rephrasing suggestions here
+    stream: true,
+    options: {
+      temperature: modelConfig.temperature,
+      num_predict: modelConfig.max_tokens
+    }
+  }),
+  signal: abortControllerRef.current.signal
+});
+
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+      if (!response.body) throw new Error("No response body");
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let botMessage = "";
+      
+      // Add placeholder message
+      setMessages(prev => [...prev, { 
+        text: "", 
+        sender: "bot", 
+        timestamp: new Date().toISOString(),
+        loading: true 
+      }]);
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        
+        const text = decoder.decode(value, { stream: true });
+        const chunks = text.trim().split('\n');
+        
+        for (const chunk of chunks) {
+          if (!chunk) continue;
+          try {
+            const parsed = JSON.parse(chunk);
+            if (parsed.response) {
+              botMessage += parsed.response;
+              setMessages(prev => {
+                const newMessages = [...prev];
+                newMessages[newMessages.length - 1] = { 
+                  ...newMessages[newMessages.length - 1], 
+                  text: botMessage,
+                  loading: false
+                };
+                return newMessages;
+              });
+            }
+          } catch (e) {
+            console.error("Error parsing chunk:", e);
+          }
+        }
+      }
+    } catch (error) {
+      if (error.name !== 'AbortError') {
+        console.error("Error:", error);
+        setMessages(prev => [...prev, { 
+          text: "Oops! Something went wrong. Please try again.", 
+          sender: "bot",
+          timestamp: new Date().toISOString()
+        }]);
+      }
+    } finally {
+      setLoading(false);
+      setTyping(false);
+      abortControllerRef.current = null;
+    }
+  }, [input, messages, modelConfig, isGreeting, isDIYRelated]);
+
+  const stopGeneration = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      setLoading(false);
+      setTyping(false);
+    }
+  };
+
+  // Basic markdown renderers
+  const renderers = {
+    code({ node, inline, className, children, ...props }) {
+      return (
+        <code className={`${className} bg-gray-700 p-1 rounded`} {...props}>
+          {children}
+        </code>
+      );
+    },
+    pre({ node, children, ...props }) {
+      return (
+        <pre className="bg-gray-800 p-3 rounded-lg overflow-x-auto my-2" {...props}>
+          {children}
+        </pre>
+      );
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-4 h-[800px] w-[800px] bg-white/10 p-6 border border-neutral-400 text-white rounded-3xl shadow-xl">
+      {/* Header */}
+      <div className="flex justify-between items-center">
+        <h1 className="text-xl font-mono uppercase font-bold">DIY Assistant</h1>
+        <div className="flex gap-2">
+          <button 
+            onClick={clearConversation}
+            className="px-3 py-1 cursor-pointer bg-red-600 hover:bg-red-500 rounded-lg font-mono"
+          >
+            Clear
+          </button>
+          <select
+            value={modelConfig.model}
+            onChange={(e) => setModelConfig(prev => ({...prev, model: e.target.value}))}
+            className="bg-[#424242] cursor-pointer focus:outline-none text-white rounded-lg px-2 py-1 font-mono"
+          >
+            <option className="font-mono cursor-pointer" value="gemma:2b">Gemma 2B</option>
+            <option className="font-mono cursor-pointer" value="llama2">Llama 2</option>
+            <option className="font-mono cursor-pointer" value="mistral">Mistral</option>
+          </select>
+        </div>
+      </div>
+
+      {/* Chat area */}
+      <div className="flex-1 overflow-y-auto custom-scrollbar">
+        {messages.length === 0 ? (
+          <div className="flex flex-col font-mono items-center justify-center h-full text-white">
+            <div className="text-4xl mb-2">👋</div>
+            <p className="text-xl">Ask me anything about DIY projects!</p>
+            <p className="text-md mt-4">Try: "How do I build a wooden shelf?"</p>
+          </div>
+        ) : (
+          messages.map((msg, index) => (
+            <div 
+              key={index} 
+              className={`relative mb-4 max-w-[70%] rounded-lg ${msg.sender === "bot" 
+                ? "px-4 pt-4 pb-3 bg-[#424242] text-[16px] text-white self-start rounded-r-2xl rounded-tl-[4px] rounded-bl-2xl" 
+                : "p-4 bg-[#424242] text-[16px] text-left self-end ml-auto rounded-br-2xl rounded-tr-[4px] rounded-l-2xl"}`}
+            >
+              <ReactMarkdown components={renderers}>{msg.text}</ReactMarkdown>
+              
+              {msg.sender === "bot" && (
+                <div className="flex justify-end mt-2 space">
+                  <button
+                    className={`p-1 rounded-sm ${isSpeaking && msg.text === messages.find(m => m.sender === 'bot' && isSpeaking)?.text 
+                      ? '' 
+                      : 'hover:bg-neutral-900 cursor-pointer'}`}
+                    onClick={() => speakText(msg.text)}
+                    title={isSpeaking ? "Stop speaking" : "Speak"}
+                  >
+                    {isSpeaking && msg.text === messages.find(m => m.sender === 'bot' && isSpeaking)?.text ? (
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" class="icon-md-heavy"><path fill-rule="evenodd" clip-rule="evenodd" d="M2 12C2 6.47715 6.47715 2 12 2C17.5228 2 22 6.47715 22 12C22 17.5228 17.5228 22 12 22C6.47715 22 2 17.5228 2 12ZM9.5 8.5C8.94772 8.5 8.5 8.94772 8.5 9.5V14.5C8.5 15.0523 8.94772 15.5 9.5 15.5H14.5C15.0523 15.5 15.5 15.0523 15.5 14.5V9.5C15.5 8.94772 15.0523 8.5 14.5 8.5H9.5Z" fill="currentColor"></path></svg>
+                    ) : (
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" class="icon-md-heavy"><path fill-rule="evenodd" clip-rule="evenodd" d="M11 4.9099C11 4.47485 10.4828 4.24734 10.1621 4.54132L6.67572 7.7372C6.49129 7.90626 6.25019 8.00005 6 8.00005H4C3.44772 8.00005 3 8.44776 3 9.00005V15C3 15.5523 3.44772 16 4 16H6C6.25019 16 6.49129 16.0938 6.67572 16.2629L10.1621 19.4588C10.4828 19.7527 11 19.5252 11 19.0902V4.9099ZM8.81069 3.06701C10.4142 1.59714 13 2.73463 13 4.9099V19.0902C13 21.2655 10.4142 22.403 8.81069 20.9331L5.61102 18H4C2.34315 18 1 16.6569 1 15V9.00005C1 7.34319 2.34315 6.00005 4 6.00005H5.61102L8.81069 3.06701ZM20.3166 6.35665C20.8019 6.09313 21.409 6.27296 21.6725 6.75833C22.5191 8.3176 22.9996 10.1042 22.9996 12.0001C22.9996 13.8507 22.5418 15.5974 21.7323 17.1302C21.4744 17.6185 20.8695 17.8054 20.3811 17.5475C19.8927 17.2896 19.7059 16.6846 19.9638 16.1962C20.6249 14.9444 20.9996 13.5175 20.9996 12.0001C20.9996 10.4458 20.6064 8.98627 19.9149 7.71262C19.6514 7.22726 19.8312 6.62017 20.3166 6.35665ZM15.7994 7.90049C16.241 7.5688 16.8679 7.65789 17.1995 8.09947C18.0156 9.18593 18.4996 10.5379 18.4996 12.0001C18.4996 13.3127 18.1094 14.5372 17.4385 15.5604C17.1357 16.0222 16.5158 16.1511 16.0539 15.8483C15.5921 15.5455 15.4632 14.9255 15.766 14.4637C16.2298 13.7564 16.4996 12.9113 16.4996 12.0001C16.4996 10.9859 16.1653 10.0526 15.6004 9.30063C15.2687 8.85905 15.3578 8.23218 15.7994 7.90049Z" fill="currentColor"></path></svg>
+                    )}
+                  </button>
+              
+                </div>
+              )}
+            </div>
+          ))
+        )}
+        {typing && (
+          <div className="flex items-center gap-1 p-4 bg-gray-800 rounded-lg max-w-[85%] self-start rounded-tl-none">
+            <div className="w-2 h-2 rounded-full bg-gray-400 animate-bounce"></div>
+            <div className="w-2 h-2 rounded-full bg-gray-400 animate-bounce" style={{ animationDelay: '0.2s' }}></div>
+            <div className="w-2 h-2 rounded-full bg-gray-400 animate-bounce" style={{ animationDelay: '0.4s' }}></div>
+          </div>
+        )}
+        <div ref={chatEndRef} />
+      </div>
+
+      {/* Input area */}
+      <div className="flex flex-col gap-2">
+        <div className="flex w-full items-center bg-[#424242] gap-2 px-4 py-3 rounded-xl">
+          <textarea
+            className="flex-1 h-[40px] min-h-[40px] max-h-[160px] py-2 overflow-hidden resize-none bg-transparent text-white focus:outline-none placeholder-gray-400"
+            placeholder="Ask about DIY projects..."
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                handleSendMessage();
+              }
+            }}
+            rows="1"
+          />
+          <div className="flex gap-2">
+            {loading ? (
+              <button 
+                onClick={stopGeneration}
+                className="p-[5px] rounded-full bg-red-500"
+                title="Stop generating"
+              >
+                <svg width="34" height="34" viewBox="0 0 24 24" fill="black" xmlns="http://www.w3.org/2000/svg" class="icon-lg"><rect x="7" y="7" width="10" height="10" rx="1.25" fill="currentColor"></rect></svg>
+              </button>
+            ) : (
+              <button 
+                className={`p- rounded-full cursor-pointer ${!input.trim() ? 'bg-white opacity-50 cursor-not-allowed' : 'bg-white'}`} 
+                onClick={handleSendMessage} 
+                disabled={!input.trim()}
+                title="Send message"
+              >
+                <svg width="40" height="40" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
+            <path fillRule="evenodd" clipRule="evenodd" d="M15.1918 8.90615C15.6381 8.45983 16.3618 8.45983 16.8081 8.90615L21.9509 14.049C22.3972 14.4953 22.3972 15.2189 21.9509 15.6652C21.5046 16.1116 20.781 16.1116 20.3347 15.6652L17.1428 12.4734V22.2857C17.1428 22.9169 16.6311 23.4286 15.9999 23.4286C15.3688 23.4286 14.8571 22.9169 14.8571 22.2857V12.4734L11.6652 15.6652C11.2189 16.1116 10.4953 16.1116 10.049 15.6652C9.60265 15.2189 9.60265 14.4953 10.049 14.049L15.1918 8.90615Z" fill="black"></path>
+          </svg>
+              </button>
+            )}
+          </div>
+        </div>
+        <div className="flex justify-between text-xs text-gray-400 px-2">
+          <span>{modelConfig.model}</span>
+          <span>Press Shift+Enter for new line</span>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default Ollmabot;
+
+
+
